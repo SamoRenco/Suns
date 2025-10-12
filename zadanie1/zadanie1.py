@@ -1,117 +1,287 @@
 import pandas as pd
 import numpy as np
+import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from torch.optim.lr_scheduler import LambdaLR
 
-data = pd.read_csv("data/zadanie1-data.csv", sep=";")
+
+
 
 #---------------------------- Data Cleaning ---------------------------------#
+def prep_data():
+    data = pd.read_csv("data/zadanie1-data.csv", sep=";")
 
-print("Pôvodný počet riadkov:", len(data))
+    print("Pôvodný počet riadkov:", len(data))
 
-data = data[(data["age"] >= 18) & (data["age"] <= 100)]
-print("Po odstránení nereálnych vekov:", len(data))
+    data = data[(data["age"] >= 18) & (data["age"] <= 100)]
 
-data = data.drop(columns=["default"]) # vacsina zaznamov ma "no", iba jedno "yes"
-data = data.drop(columns=["euribor3m"]) # polovica null
-data = data.drop(columns=["pdays"]) # vacsina 999
-data = data.drop(columns=["duration"]) # ma byt iba na benchmark
-data = data.drop(columns=["previous"]) # vacsina 0.0
+    data = data.drop(columns=["default"]) # vacsina zaznamov ma "no", iba jedno "yes"
+    data = data.drop(columns=["euribor3m"]) # polovica null
+    data = data.drop(columns=["pdays"]) # vacsina 999
+    data = data.drop(columns=["duration"]) # ma byt iba na benchmark
+    data = data.drop(columns=["previous"]) # vacsina 0.0
 
-data = data.dropna()
-print("Počet riadkov po odstránení NaN:", len(data))
+    data = data.dropna()
+    print("Počet riadkov po odstránení NaN:", len(data))
 
-Q1 = data["campaign"].quantile(0.25)
-Q3 = data["campaign"].quantile(0.75)
-IQR = Q3 - Q1
+    Q1 = data["campaign"].quantile(0.25)
+    Q3 = data["campaign"].quantile(0.75)
+    IQR = Q3 - Q1
 
-lower_bound = Q1 - 1.5 * IQR
-upper_bound = Q3 + 1.5 * IQR
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
 
-data = data[(data["campaign"] >= lower_bound) & (data["campaign"] <= upper_bound)]
-print(f"Po odstránení outlierov (IQR): {len(data)} riadkov zostáva.")
+    data = data[(data["campaign"] >= lower_bound) & (data["campaign"] <= upper_bound)]
+    print(f"Po odstránení outlierov (IQR): {len(data)} riadkov zostáva.")
 
-data.to_csv("data/zadanie1_data_clean.csv", index=False, sep=";")
+    data.to_csv("data/zadanie1_data_clean.csv", index=False, sep=";")
 
-#---------------------------- One-Hot Encoding ---------------------------------#
+    #---------------------------- One-Hot Encoding ---------------------------------#
 
-y = data["subscribed"]
-X = data.drop(columns=["subscribed"])
+    y = data["subscribed"]
+    X = data.drop(columns=["subscribed"])
 
+    X_encoded = pd.get_dummies(X, drop_first=True)
+    X_encoded = X_encoded.astype(float)
 
-X_encoded = pd.get_dummies(X, drop_first=True)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_encoded)
 
-# spojíme späť cieľovú premennú
-encoded_data = pd.concat([X_encoded, y], axis=1)
+    X_scaled = pd.DataFrame(X_scaled, columns=X_encoded.columns)
 
-# uloženie zakódovaných dát
-encoded_data.to_csv("data/zadanie1_data_encoded.csv", index=False, sep=";")
+    encoded_data = pd.concat([X_scaled, y.reset_index(drop=True)], axis=1)
 
-#---------------------------- Data split ---------------------------------#
+    encoded_data.to_csv("data/zadanie1_data_encoded.csv", index=False, sep=";")
 
-data = pd.read_csv("data/zadanie1_data_encoded.csv", sep=";")
+    #---------------------------- Data split ---------------------------------#
 
-y = data["subscribed"]
-X = data.drop(columns=["subscribed"])
+    data = pd.read_csv("data/zadanie1_data_encoded.csv", sep=";")
 
-
-X_temp, X_test, y_temp, y_test = train_test_split(
-    X, y, test_size=0.15, random_state=42, stratify=y
-)
+    y = data["subscribed"]
+    X = data.drop(columns=["subscribed"])
 
 
-X_train, X_val, y_train, y_val = train_test_split(
-    X_temp, y_temp, test_size=0.1765, random_state=42, stratify=y_temp
-)
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y, test_size=0.1, random_state=42, stratify=y
+    )
+
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=0.1111, random_state=42, stratify=y_temp
+    )
+
+    y_train = (y_train == "yes").astype(int)
+    y_val = (y_val == "yes").astype(int)
+    y_test = (y_test == "yes").astype(int)
+
+    return X_train, X_val, X_test, y_train, y_val, y_test
 
 
 #---------------------------- Sklearn ---------------------------------#
 
-y_train = (y_train == "yes").astype(int)
-y_val = (y_val == "yes").astype(int)
-y_test = (y_test == "yes").astype(int)
+def sklearn_model(X_train, X_val, X_test, y_train, y_val, y_test):
+
+    model = LogisticRegression(max_iter=1000, solver='liblinear')
+    model.fit(X_train, y_train)
 
 
-model = LogisticRegression(max_iter=1000, solver='liblinear')
-model.fit(X_train, y_train)
+    y_train_pred = model.predict(X_train)
+    y_val_pred = model.predict(X_val)
+    y_test_pred = model.predict(X_test)
+
+    print("Presnosť (tréning):", accuracy_score(y_train, y_train_pred))
+    print("Presnosť (validačná):", accuracy_score(y_val, y_val_pred))
+    print("Presnosť (testovacia):", accuracy_score(y_test, y_test_pred))
 
 
-y_train_pred = model.predict(X_train)
-y_val_pred = model.predict(X_val)
-y_test_pred = model.predict(X_test)
+    cm = confusion_matrix(y_test, y_test_pred)
+    classes = ["No", "Yes"]
 
-print("Presnosť (tréning):", accuracy_score(y_train, y_train_pred))
-print("Presnosť (validačná):", accuracy_score(y_val, y_val_pred))
-print("Presnosť (testovacia):", accuracy_score(y_test, y_test_pred))
+    plt.figure(figsize=(5, 4))
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title("Konfúzna matica - Testovacia množina")
+    plt.colorbar()
 
-
-cm = confusion_matrix(y_test, y_test_pred)
-classes = ["No", "Yes"]
-
-plt.figure(figsize=(5, 4))
-plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-plt.title("Konfúzna matica - Testovacia množina")
-plt.colorbar()
-
-tick_marks = np.arange(len(classes))
-plt.xticks(tick_marks, classes)
-plt.yticks(tick_marks, classes)
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes)
+    plt.yticks(tick_marks, classes)
 
 
-thresh = cm.max() / 2.0
-for i, j in np.ndindex(cm.shape):
-    plt.text(j, i, format(cm[i, j], "d"),
-             horizontalalignment="center",
-             color="white" if cm[i, j] > thresh else "black")
+    thresh = cm.max() / 2.0
+    for i, j in np.ndindex(cm.shape):
+        plt.text(j, i, format(cm[i, j], "d"),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
 
-plt.ylabel("Skutočná hodnota")
-plt.xlabel("Predikovaná hodnota")
-plt.tight_layout()
-plt.show()
+    plt.ylabel("Skutočná hodnota")
+    plt.xlabel("Predikovaná hodnota")
+    plt.tight_layout()
+    plt.show()
+
+
+def neuronka(
+    X_train, X_val, X_test, y_train, y_val, y_test,
+    hidden_layers=[128, 64, 32],
+    epochs=200,
+    lr=0.001,
+    batch_size=32,
+    sample_frac=1.0,     # < 1.0 = len časť dát (simulácia overfittingu)
+    dropout_rate=0.0,    # pridáme neskôr pri regulácii
+    show_plot=True,
+    best_val_loss = float("inf"),
+    patience = 15,
+    wait = 0,
+    min_delta = 0.001
+):
 
 
 
+    if sample_frac < 1.0:
+        X_train = X_train.sample(frac=sample_frac, random_state=42)
+        y_train = y_train.loc[X_train.index]
+
+    # prevod na tensory
+    X_train_t = torch.tensor(X_train.values, dtype=torch.float32)
+    y_train_t = torch.tensor(y_train.values, dtype=torch.float32).unsqueeze(1)
+    X_val_t = torch.tensor(X_val.values, dtype=torch.float32)
+    y_val_t = torch.tensor(y_val.values, dtype=torch.float32).unsqueeze(1)
+    X_test_t = torch.tensor(X_test.values, dtype=torch.float32)
+    y_test_t = torch.tensor(y_test.values, dtype=torch.float32).unsqueeze(1)
+
+    train_ds = TensorDataset(X_train_t, y_train_t)
+    val_ds = TensorDataset(X_val_t, y_val_t)
+    test_ds = TensorDataset(X_test_t, y_test_t)
+
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_dl = DataLoader(val_ds, batch_size=batch_size)
+
+
+    class FlexibleNN(nn.Module):
+        def __init__(self, input_dim, hidden_layers, dropout_rate):
+            super().__init__()
+            layers = []
+            prev_dim = input_dim
+            for hidden_dim in hidden_layers:
+                layers.append(nn.Linear(prev_dim, hidden_dim))
+                layers.append(nn.ReLU())
+                if dropout_rate > 0:
+                    layers.append(nn.Dropout(dropout_rate))
+                prev_dim = hidden_dim
+            layers.append(nn.Linear(prev_dim, 1))
+            layers.append(nn.Sigmoid())
+            self.net = nn.Sequential(*layers)
+
+        def forward(self, x):
+            return self.net(x)
+
+    model = FlexibleNN(X_train.shape[1], hidden_layers, dropout_rate)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-6)
+
+    def warmup(epoch):
+        if epoch < 5:
+            return (epoch + 1) / 5
+        return 1.0
+
+    scheduler = LambdaLR(optimizer, lr_lambda=warmup)
+
+    train_losses, val_losses = [], []
+
+    #Tréning
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0
+        for xb, yb in train_dl:
+            optimizer.zero_grad()
+            preds = model(xb)
+            loss = criterion(preds, yb)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * xb.size(0)
+        train_loss = running_loss / len(train_dl.dataset)
+
+        # Validácia
+        model.eval()
+        with torch.no_grad():
+            val_preds = model(X_val_t)
+            val_loss = criterion(val_preds, y_val_t).item()
+
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+        if val_loss < best_val_loss - min_delta:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict().copy()
+            wait = 0
+        else:
+            wait += 1
+            if wait >= patience:
+                print(f"⏹ Early stopping at epoch {epoch + 1} (best val_loss={best_val_loss:.4f})")
+                model.load_state_dict(best_model_state)
+                break
+
+        scheduler.step()
+
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch + 1:03d} | Train: {train_loss:.4f} | Val: {val_loss:.4f}")
+
+    #Graf
+    if show_plot:
+        plt.figure(figsize=(7, 5))
+        plt.plot(train_losses, label="Train Loss")
+        plt.plot(val_losses, label="Validation Loss")
+        plt.title("Priebeh trénovania (PyTorch)")
+        plt.xlabel("Epócha")
+        plt.ylabel("Loss")
+        plt.ylim(0, 1)
+        plt.legend()
+        plt.show()
+
+    #Vyhodnotenie
+    model.eval()
+    with torch.no_grad():
+        preds = model(X_test_t).round()
+        acc = accuracy_score(y_test_t, preds)
+        print(f"Testovacia presnosť: {acc:.3f}")
+
+        cm = confusion_matrix(y_test_t, preds)
+        plt.imshow(cm, cmap="Blues")
+        plt.title("Konfúzna matica")
+        plt.xlabel("Predikovaná")
+        plt.ylabel("Skutočná")
+
+        for i in range(2):
+            for j in range(2):
+                plt.text(j, i, cm[i, j], ha="center", va="center")
+        plt.tight_layout()
+        plt.show()
+
+    return model
+
+
+
+if __name__ == "__main__":
+    X_train, X_val, X_test, y_train, y_val, y_test = prep_data()
+
+    #sklearn_model(X_train, X_val, X_test, y_train, y_val, y_test)
+    neuronka(
+        X_train, X_val, X_test, y_train, y_val, y_test,
+        hidden_layers=[256, 128, 64, 32],
+        epochs=300,
+        lr=0.0005,
+        batch_size=256,
+        sample_frac=1.0,
+        dropout_rate=0.2,
+        patience = 45
+    )
 
 
