@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import seaborn as sns
 import matplotlib.pyplot as plt
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
@@ -149,6 +150,153 @@ def sklearn_model(X_train, X_val, X_test, y_train, y_val, y_test):
     plt.tight_layout()
     plt.show()
 
+# ---------------------------- EDA ---------------------------------#
+
+def eda_1():
+
+    data = pd.read_csv("data/zadanie1-data.csv", sep=";")
+
+
+    bins = [15, 25, 35, 45, 55, 65, 75, 85, 95, data["age"].max() + 1]
+    labels = ["15–25", "26–35", "36–45", "46–55", "56–65", "66–75", "76–85", "86–95", "95+"]
+    data["age_group"] = pd.cut(data["age"], bins=bins, labels=labels, right=False)
+
+
+    pivot = data.pivot_table(values="campaign", index="job", columns="age_group", aggfunc="mean", observed=False)
+
+
+    plt.figure(figsize=(10, 7))
+    ax = sns.heatmap(pivot, cmap="YlGnBu", annot=True, fmt=".2f", linewidths=0.5)
+
+    plt.title("Priemerný počet kontaktov podľa práce a vekovej skupiny", fontsize=13, fontweight="bold")
+    plt.xlabel("Veková skupina",  fontweight="bold")
+    plt.ylabel("Typ práce",  fontweight="bold")
+
+
+    colorbar = ax.collections[0].colorbar
+    colorbar.set_label("Priemerný počet kontaktov", fontsize=11, fontweight="bold")
+
+    plt.tight_layout()
+    plt.show()
+
+def eda_2():
+    data = pd.read_csv("data/zadanie1_data_clean.csv", sep=";")
+
+
+    data["debt_level"] = (data["housing"].map({"yes": 1, "no": 0}) +
+                          data["loan"].map({"yes": 1, "no": 0}))
+
+
+    pivot = data.groupby("job")["debt_level"].mean().sort_values(ascending=False)
+
+
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x=pivot.values, y=pivot.index, palette="YlGnBu")
+
+    plt.title("Priemerná počet pôžičiek podľa zamestnania", fontsize=13, fontweight="bold")
+    plt.xlabel("Priemerná úroveň zadĺženia (od 0 po 2 pôžičky)", fontweight="bold")
+    plt.ylabel("Typ práce", fontweight="bold")
+    plt.tight_layout()
+    plt.show()
+
+
+def eda_3():
+    data = pd.read_csv("data/zadanie1-data.csv", sep=";")
+    data = data[(data["age"] >= 18) & (data["age"] <= 100)]
+    data = data[(data["duration"] >= 0)]
+    Q1 = data["duration"].quantile(0.25)
+    Q3 = data["duration"].quantile(0.75)
+    IQR = Q3 - Q1
+
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+
+    data = data[(data["duration"] >= lower_bound) & (data["duration"] <= upper_bound)]
+
+    plt.figure(figsize=(10, 6))
+    plt.hexbin(
+        data["age"],
+        data["duration"],
+        gridsize=40,
+        cmap="viridis",
+        mincnt=1
+    )
+    plt.colorbar(label="Počet klientov")
+    plt.title("Pomer dĺžky hovoru k veku klienta", fontsize=13, fontweight="bold")
+    plt.xlabel("Vek klienta", fontweight="bold")
+    plt.ylabel("Dĺžka hovoru (v sekundách)", fontweight="bold")
+    plt.tight_layout()
+    plt.show()
+
+
+def eda_4():
+    data = pd.read_csv("data/zadanie1-data.csv", sep=";")
+    data = data.dropna(subset=["month", "day_of_week", "marital", "subscribed"])
+
+
+    data["subscribed"] = (data["subscribed"] == "yes").astype(int)
+
+
+    month_order = ["jan", "feb", "mar", "apr", "may", "jun",
+                   "jul", "aug", "sep", "oct", "nov", "dec"]
+    day_order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+    data["day_of_week"] = pd.Categorical(data["day_of_week"], categories=day_order, ordered=True)
+
+
+    pivot = data.pivot_table(
+        values="subscribed",
+        index="month",
+        columns="day_of_week",
+        aggfunc="mean"
+    ).reindex(index=month_order, columns=day_order)
+
+
+    for marital_status in data["marital"].unique():
+        subset = data[data["marital"] == marital_status]
+        pivot = subset.pivot_table(
+            values="subscribed",
+            index="month",
+            columns="day_of_week",
+            aggfunc="mean"
+        ).reindex(month_order)
+
+
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(pivot, cmap="YlGnBu", annot=True, fmt=".2f", linewidths=0.5, cbar_kws={'label': 'Pravdepodobnosť úspechu kampane'})
+        plt.title(f"Úspešnosť kampane podľa mesiaca a dňa pre stav: {marital_status}", fontsize=12, fontweight="bold")
+        plt.xlabel("Deň kontaktu", fontweight="bold")
+        plt.ylabel("Mesiac", fontweight="bold")
+        plt.tight_layout()
+        plt.show()
+
+def eda_5():
+    data = pd.read_csv("data/zadanie1-data.csv", sep=";")
+    data = data[(data["age"] >= 18) & (data["age"] <= 100)]
+
+
+    plt.figure(figsize=(10, 6))
+    sns.violinplot(
+        data=data,
+        x="education",
+        y="age",
+        hue="subscribed",
+        split=True,
+        inner="quart",
+        palette="coolwarm"
+    )
+
+    plt.title("Úspešnosť kampane vzhľadom na vek a vzdelanie klienta", fontsize=13, fontweight="bold")
+    plt.xlabel("Vzdelanie", fontweight="bold")
+    plt.ylabel("Vek klienta", fontweight="bold")
+    plt.legend(title="Subscribed")
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+#---------------------------- Neuronka ---------------------------------#
 
 def neuronka(
     X_train, X_val, X_test, y_train, y_val, y_test,
@@ -156,19 +304,15 @@ def neuronka(
     epochs=200,
     lr=0.001,
     batch_size=32,
-    sample_frac=1.0,
     dropout_rate=0.0,
     wd = 0.0,
-    config_name="Model",
-    show_plot=True,
     best_val_loss = float("inf"),
     patience = 15,
     wait = 0,
     min_delta = 0.001
 ):
 
-
-    # prevod na tensory
+# ---------------------------- Tensor ---------------------------------#
     X_train_t = torch.tensor(X_train.values, dtype=torch.float32)
     y_train_t = torch.tensor(y_train.values, dtype=torch.float32).unsqueeze(1)
     X_val_t = torch.tensor(X_val.values, dtype=torch.float32)
@@ -178,10 +322,10 @@ def neuronka(
 
     train_ds = TensorDataset(X_train_t, y_train_t)
     val_ds = TensorDataset(X_val_t, y_val_t)
-    test_ds = TensorDataset(X_test_t, y_test_t)
+
 
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_dl = DataLoader(val_ds, batch_size=batch_size)
+
 
 
     class FlexibleNN(nn.Module):
@@ -206,17 +350,12 @@ def neuronka(
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
-    # def warmup(epoch):
-    #     if epoch < 5:
-    #         return (epoch + 1) / 5
-    #     return 1.0
-
     scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
 
     train_losses, val_losses, test_losses = [], [], []
     train_accs, val_accs, test_accs = [], [], []
 
-    #Tréning
+    #---------------------------- Trening ---------------------------------#
     for epoch in range(epochs):
         model.train()
         running_loss, correct_train = 0, 0
@@ -233,7 +372,7 @@ def neuronka(
         train_loss = running_loss / len(train_dl.dataset)
         train_acc = correct_train / len(train_dl.dataset)
 
-        # Validácia
+        #---------------------------- Validacia ---------------------------------#
         model.eval()
         with torch.no_grad():
             val_preds = model(X_val_t)
@@ -267,7 +406,7 @@ def neuronka(
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch + 1:03d} | Train: {train_loss:.4f} | Val: {val_loss:.4f}")
 
-    # === LOSS GRAF ===
+    #---------------------------- Graf Loss ---------------------------------#
     plt.figure(figsize=(7, 5))
     plt.plot(train_losses, label="Train Loss", linewidth=2)
     plt.plot(val_losses, label="Validation Loss", linewidth=2)
@@ -279,7 +418,7 @@ def neuronka(
     plt.tight_layout()
     plt.show()
 
-    # === ACCURACY GRAF ===
+    #---------------------------- Graf acc ---------------------------------#
     plt.figure(figsize=(7, 5))
     plt.plot(train_accs, label="Train Accuracy", linewidth=2)
     plt.plot(val_accs, label="Validation Accuracy", linewidth=2)
@@ -291,7 +430,7 @@ def neuronka(
     plt.tight_layout()
     plt.show()
 
-    # === VÝSLEDKY ===
+    #---------------------------- Vysledky ---------------------------------#
     model.eval()
     with torch.no_grad():
         train_preds_binary = (model(X_train_t) > 0.5).float()
@@ -306,7 +445,7 @@ def neuronka(
     print(f"Finálna Train Accuracy: {train_final_acc:.4f}")
     print(f"Finálna Test Accuracy:  {test_final_acc:.4f}")
 
-    # === KONFÚZNA MATICA – TRÉNING ===
+    #---------------------------- Konfuzna matica train ---------------------------------#
     cm_train = confusion_matrix(y_train_t, train_preds_binary)
     plt.figure(figsize=(5, 4))
     plt.imshow(cm_train, cmap="Blues")
@@ -324,7 +463,7 @@ def neuronka(
     plt.tight_layout()
     plt.show()
 
-    # === KONFÚZNA MATICA – TEST ===
+    #---------------------------- Konfuzna matica test ---------------------------------#
     cm_test = confusion_matrix(y_test_t, test_preds_binary)
     plt.figure(figsize=(5, 4))
     plt.imshow(cm_test, cmap="Blues")
@@ -346,17 +485,23 @@ def neuronka(
 if __name__ == "__main__":
     X_train, X_val, X_test, y_train, y_val, y_test = prep_data()
 
+    #eda_1()
+    #eda_2()
+    #eda_3()
+    #eda_4()
+    eda_5()
+
     #sklearn_model(X_train, X_val, X_test, y_train, y_val, y_test)
-    neuronka(
-        X_train, X_val, X_test, y_train, y_val, y_test,
-        hidden_layers=[256, 128, 64, 32],
-        epochs=500,
-        lr=0.00001 ,
-        batch_size=128,
-        sample_frac=1.0,
-        dropout_rate=0.3,
-        patience = 30,
-        wd = 1e-5
-    )
+    # neuronka(
+    #     X_train, X_val, X_test, y_train, y_val, y_test,
+    #     hidden_layers=[256, 128, 64, 32],
+    #     epochs=500,
+    #     lr=0.00001 ,
+    #     batch_size=128,
+    #     sample_frac=1.0,
+    #     dropout_rate=0.3,
+    #     patience = 30,
+    #     wd = 1e-5
+    # )
 
 
