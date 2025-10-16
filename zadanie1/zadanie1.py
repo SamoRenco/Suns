@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import LambdaLR
 def prep_data():
     data = pd.read_csv("data/zadanie1-data.csv", sep=";")
 
-    print("Pôvodný počet riadkov:", len(data))
+    #print("Pôvodný počet riadkov:", len(data))
 
     data = data[(data["age"] >= 18) & (data["age"] <= 100)]
 
@@ -31,7 +31,7 @@ def prep_data():
     data = data.drop(columns=["previous"]) # vacsina 0.0
 
     data = data.dropna()
-    print("Počet riadkov po odstránení NaN:", len(data))
+    #print("Počet riadkov po odstránení NaN:", len(data))
 
     Q1 = data["campaign"].quantile(0.25)
     Q3 = data["campaign"].quantile(0.75)
@@ -41,7 +41,7 @@ def prep_data():
     upper_bound = Q3 + 1.5 * IQR
 
     data = data[(data["campaign"] >= lower_bound) & (data["campaign"] <= upper_bound)]
-    print(f"Po odstránení outlierov (IQR): {len(data)} riadkov zostáva.")
+    #print(f"Po odstránení outlierov (IQR): {len(data)} riadkov zostáva.")
 
     data.to_csv("data/zadanie1_data_clean.csv", index=False, sep=";")
 
@@ -321,14 +321,11 @@ def neuronka(
     y_test_t = torch.tensor(y_test.values, dtype=torch.float32).unsqueeze(1)
 
     train_ds = TensorDataset(X_train_t, y_train_t)
-    val_ds = TensorDataset(X_val_t, y_val_t)
-
-
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
 
 
-    class FlexibleNN(nn.Module):
+    class NN_pokus(nn.Module):
         def __init__(self, input_dim, hidden_layers, dropout_rate):
             super().__init__()
             layers = []
@@ -346,7 +343,7 @@ def neuronka(
         def forward(self, x):
             return self.net(x)
 
-    model = FlexibleNN(X_train.shape[1], hidden_layers, dropout_rate)
+    model =NN_pokus(X_train.shape[1], hidden_layers, dropout_rate)
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
@@ -489,19 +486,18 @@ if __name__ == "__main__":
     #eda_2()
     #eda_3()
     #eda_4()
-    eda_5()
+    #eda_5()
 
     #sklearn_model(X_train, X_val, X_test, y_train, y_val, y_test)
-    # neuronka(
-    #     X_train, X_val, X_test, y_train, y_val, y_test,
-    #     hidden_layers=[256, 128, 64, 32],
-    #     epochs=500,
-    #     lr=0.00001 ,
-    #     batch_size=128,
-    #     sample_frac=1.0,
-    #     dropout_rate=0.3,
-    #     patience = 30,
-    #     wd = 1e-5
-    # )
+    neuronka(
+        X_train, X_val, X_test, y_train, y_val, y_test,
+        hidden_layers=[256, 128, 64, 32],
+        epochs=500,
+        lr=0.00001 ,
+        batch_size=128,
+        dropout_rate=0.3,
+        patience = 30,
+        wd = 1e-5
+    )
 
 
