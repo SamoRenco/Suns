@@ -29,7 +29,6 @@ DROPOUT_RATE = 0.4
 EARLY_STOPPING_PATIENCE = 8
 
 
-
 # -------------------- CUDA / GPU DETEKCIA --------------------------------#
 
 
@@ -95,16 +94,12 @@ class LinearRegressor(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(1280, 512),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.2),
 
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-
-            nn.Linear(256, 64),
+            nn.Linear(512, 128),
             nn.ReLU(),
 
-            nn.Linear(64, 1),
+            nn.Linear(128, 1)
         )
 
     def forward(self, x):
@@ -371,7 +366,6 @@ def plot_training_curves(train_losses, val_losses):
     plt.tight_layout()
     plt.savefig("training_curve.png")
     plt.show()
-
 
 
 # ===========
