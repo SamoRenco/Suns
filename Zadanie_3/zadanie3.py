@@ -6,11 +6,14 @@ import re
 import numpy as np
 from datetime import datetime
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+from torchvision import transforms, models
 from PIL import Image
 
 
@@ -18,12 +21,13 @@ from PIL import Image
 
 DATA_DIR = "data"
 SUBFOLDERS = ["01", "04", "07", "10"]
-IMG_SIZE = (224, 224)        # menší vstup pre rýchlosť a menej parametrov
+IMG_SIZE = (224, 224)
 BATCH_SIZE = 64
-NUM_EPOCHS = 40            # viac epoch, nech sa stihne naučiť
-LR = 1e-4                  # trochu vyšší learning rate pre väčší model
-DROPOUT_RATE = 0.4           # silnejší dropout proti overfittingu
+NUM_EPOCHS = 120
+LR = 1e-4
+DROPOUT_RATE = 0.4
 EARLY_STOPPING_PATIENCE = 8
+
 
 
 # -------------------- CUDA / GPU DETEKCIA --------------------------------#
@@ -33,11 +37,38 @@ def print_device_info():
     print("Start timestamp:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        print("✅ GPU detected:", torch.cuda.get_device_name(0))
+        print("GPU detected:", torch.cuda.get_device_name(0))
     else:
         device = torch.device("cpu")
-        print("❌ GPU NOT detected, using CPU.")
+        print("GPU NOT detected, using CPU.")
     return device
+
+
+# -------------------- TRANSFER LEARNING – FEATURE EXTRACTION -------------------- #
+
+mobilenet_transform = transforms.Compose([
+    transforms.Resize(IMG_SIZE),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
+
+def load_mobilenet(device):
+    model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
+    model.classifier = nn.Identity()
+    model.to(device)
+    model.eval()
+    return model
+
+
+def extract_feature_vector(model, img_path, device):
+    img = Image.open(img_path).convert("RGB")
+    img = mobilenet_transform(img).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        feat = model(img).cpu().numpy().flatten()
+
+    return feat
 
 
 # -------------------- PyTorch DATASET + DATALOADER ------------------------#
@@ -56,6 +87,43 @@ val_test_transform = transforms.Compose([
     transforms.Resize(IMG_SIZE),
     transforms.ToTensor(),
 ])
+
+
+class LinearRegressor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1280, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.Linear(256, 64),
+            nn.ReLU(),
+
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class FeatureDataset(Dataset):
+    def __init__(self, df):
+        feature_cols = [c for c in df.columns if c.startswith("f")]
+        self.X = df[feature_cols].values
+        self.y = df["Irradiance"].values
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        X = torch.tensor(self.X[idx], dtype=torch.float32)
+        y = torch.tensor(self.y[idx], dtype=torch.float32)
+        return X, y
 
 
 class IrradianceDataset(Dataset):
@@ -240,6 +308,38 @@ def match_images_to_csv(df):
     return pd.DataFrame(matched)
 
 
+
+
+def extract_features_dataframe(matched_df, device):
+    print("Loading MobileNetV2 for feature extraction...")
+    model = load_mobilenet(device)
+
+    feature_list = []
+    feature_vectors = []
+
+    for idx, row in matched_df.iterrows():
+        img_path = row["image_path"]
+        feat = extract_feature_vector(model, img_path, device)
+
+        feature_list.append({
+            "image_path": img_path,
+            "Irradiance": row["Irradiance"]
+        })
+        feature_vectors.append(feat)
+
+        if idx % 200 == 0:
+            print(f"Processed {idx}/{len(matched_df)} images...")
+
+    df_features = pd.DataFrame(feature_list)
+    df_vecs = pd.DataFrame(feature_vectors, columns=[f"f{i}" for i in range(len(feature_vectors[0]))])
+
+    final_df = pd.concat([df_features, df_vecs], axis=1)
+    final_df.to_parquet("mobilenet_features.parquet")
+
+    print("Saved mobilenet_features.parquet")
+    return final_df
+
+
 # -------------------- SPLIT DATA ------------------------------------------#
 
 
@@ -271,6 +371,7 @@ def plot_training_curves(train_losses, val_losses):
     plt.tight_layout()
     plt.savefig("training_curve.png")
     plt.show()
+
 
 
 # ===========
@@ -309,6 +410,60 @@ def plot_pred_vs_true(true_vals, pred_vals, title, filename):
     plt.show()
 
 
+# ================================
+#   VISUALIZATION OF CLUSTERS
+# ================================
+
+def show_cluster_examples(features_df, save_dir="cluster_examples", max_per_cluster=16):
+    os.makedirs(save_dir, exist_ok=True)
+
+    clusters = sorted(features_df["cluster"].unique())
+
+    for cluster_id in clusters:
+        subset = features_df[features_df["cluster"] == cluster_id].head(max_per_cluster)
+
+        fig, axes = plt.subplots(4, 4, figsize=(8, 8))
+        axes = axes.flatten()
+
+        for ax, (_, row) in zip(axes, subset.iterrows()):
+            img = Image.open(row["image_path"])
+            ax.imshow(img)
+            ax.set_title(f"Irr={row['Irradiance']:.1f}")
+            ax.axis("off")
+
+        plt.tight_layout()
+        out_path = os.path.join(save_dir, f"cluster_{cluster_id}_examples.png")
+        plt.savefig(out_path)
+        plt.close()
+
+        print(f"Saved image grid for cluster {cluster_id} → {out_path}")
+
+
+def save_cluster_average_images(features_df, save_dir="cluster_averages"):
+    os.makedirs(save_dir, exist_ok=True)
+
+    clusters = sorted(features_df["cluster"].unique())
+
+    for cluster_id in clusters:
+        subset = features_df[features_df["cluster"] == cluster_id]
+
+        imgs = []
+        for img_path in subset["image_path"].values:
+            img = Image.open(img_path).convert("RGB")
+            img = img.resize((224, 224))
+            imgs.append(np.array(img, dtype=np.float32))
+
+        if len(imgs) == 0:
+            continue
+
+        avg_img = np.mean(imgs, axis=0).astype(np.uint8)
+
+        out_path = os.path.join(save_dir, f"cluster_{cluster_id}_average.png")
+        Image.fromarray(avg_img).save(out_path)
+
+        print(f"Saved average image for cluster {cluster_id} → {out_path}")
+
+
 
 # -------------------- MAIN ------------------------------------------------#
 
@@ -326,64 +481,66 @@ def main():
     # 2) MATCH OBRÁZKOV
     matched_df = match_images_to_csv(df)
 
+    print("\n===== EXTRACTING FEATURES WITH MOBILENET =====")
+    features_df = extract_features_dataframe(matched_df, device)
+    print(features_df.head())
+
+    # ============================
+    #  ZHLUKOVANIE FEATURES (K-MEANS)
+    # ============================
+
+    print("\n===== RUNNING K-MEANS CLUSTERING =====")
+
+    # Vyberieme len feature stĺpce (f0...f1279)
+    feature_cols = [c for c in features_df.columns if c.startswith("f")]
+    X = features_df[feature_cols].values
+
+    # Normalizácia (veľmi dôležité pre KMeans)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # KMeans
+    kmeans = KMeans(n_clusters=6, random_state=42)
+    clusters = kmeans.fit_predict(X_scaled)
+
+
+    features_df["cluster"] = clusters
+
+    print("Clustering done! Cluster distribution:")
+    print(features_df["cluster"].value_counts())
+
+    # =====================================
+    #   CLUSTER VISUALIZATION REQUIRED BY TASK
+    # =====================================
+    print("\n===== GENERATING CLUSTER IMAGE GRIDS =====")
+    show_cluster_examples(features_df)
+
+    print("\n===== GENERATING AVERAGE IMAGES PER CLUSTER =====")
+    save_cluster_average_images(features_df)
+
+
     # 3) SPLIT
-    train_df, val_df, test_df = split_dataframe(matched_df)
+    train_df, val_df, test_df = split_dataframe(features_df)
 
-    # 4) TRANSFORMÁCIE + DATASETY + DATALOADER
-    train_dataset = IrradianceDataset(train_df, transform=train_transform)
-    val_dataset = IrradianceDataset(val_df, transform=val_test_transform)
-    test_dataset = IrradianceDataset(test_df, transform=val_test_transform)
+    train_dataset = FeatureDataset(train_df)
+    val_dataset = FeatureDataset(val_df)
+    test_dataset = FeatureDataset(test_df)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    # 5) CNN MODEL
-    model = CNNRegressor(dropout_rate=DROPOUT_RATE).to(device)
+    # 4) MODEL + OPTIMIZER
+    model = LinearRegressor().to(device)
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=LR,
-        weight_decay= 1e-4
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
-    )
-
-    # scheduler – znižuje LR, keď sa nezlepšuje validačný MSE
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        min_lr=1e-6,
-        verbose=True
-    )
-
-    best_val_loss = float("inf")
-    best_state_dict = None
     train_losses = []
     val_losses = []
     best_val_loss = float("inf")
     epochs_no_improve = 0
 
-    # 6) TRAIN LOOP + "checkpoint"
+    # 5) TRAINING LOOP
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
         epoch_loss = 0.0
@@ -402,91 +559,227 @@ def main():
 
         epoch_loss /= len(train_loader.dataset)
 
-        # VALIDÁCIA
+        # VALIDATION
         val_mse, _, _, _, _, _ = evaluate_loader(model, val_loader, device)
-        scheduler.step(val_mse)
-
 
         train_losses.append(epoch_loss)
         val_losses.append(val_mse)
 
+        print(f"Epoch {epoch}/{NUM_EPOCHS} | Train MSE: {epoch_loss:.4f} | Val MSE: {val_mse:.4f}")
 
-        print(f"Epoch {epoch}/{NUM_EPOCHS} - "
-              f"train MSE: {epoch_loss:.4f} | val MSE: {val_mse:.4f}")
-
-        # uložíme najlepší model
+        # EARLY STOPPING
         if val_mse < best_val_loss:
-
             best_val_loss = val_mse
-            best_state_dict = model.state_dict()
-            torch.save(best_state_dict, "best_model.pt")
+            torch.save(model.state_dict(), "best_mlp.pt")
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
-                print(f"\nEarly stopping triggered (no improvement for {EARLY_STOPPING_PATIENCE} epochs).")
+                print("Early stopping activated!")
                 break
 
-    print("\nLoading BEST model from checkpoint...")
-    if best_state_dict is None:
-        best_state_dict = torch.load("best_model.pt", map_location=device)
-    model.load_state_dict(best_state_dict)
+    # Load best model
+    model.load_state_dict(torch.load("best_mlp.pt"))
 
-    # 7) EVALUÁCIA NA TRAIN + TEST
+
+    # 6) EVALUATION
     print("\nEvaluating model on TRAINING SET...")
-    train_mse, train_mae, train_rmse, train_r2, train_y_true, train_y_pred = \
+    train_mse, train_mae, train_rmse, train_r2, train_true, train_pred = \
         evaluate_loader(model, train_loader, device)
 
     print("\nEvaluating model on TEST SET...")
-    test_mse, test_mae, test_rmse, test_r2, test_y_true, test_y_pred = \
+    test_mse, test_mae, test_rmse, test_r2, test_true, test_pred = \
         evaluate_loader(model, test_loader, device)
 
-    print("\n================ MODEL METRICS ================")
-    print("TRAINING:")
-    print(f"MSE:  {train_mse:.4f}")
-    print(f"MAE:  {train_mae:.4f}")
-    print(f"RMSE: {train_rmse:.4f}")
-    print(f"R2:   {train_r2:.4f}")
-
-    print("\nTESTING:")
-    print(f"MSE:  {test_mse:.4f}")
-    print(f"MAE:  {test_mae:.4f}")
-    print(f"RMSE: {test_rmse:.4f}")
-    print(f"R2:   {test_r2:.4f}")
-
-    # ------------------ REZIDUÁLY (uloženie na ďalšie grafy) ---------------
-
-    np.save("train_true.npy", train_y_true)
-    np.save("train_pred.npy", train_y_pred)
-    np.save("test_true.npy", test_y_true)
-    np.save("test_pred.npy", test_y_pred)
-
-    print("\nReziduály uložené do .npy súborov.")
-    print("================================================\n")
-
-    # ========  TRAINING CURVES  =========
+    # === TRAINING CURVES ===
     plot_training_curves(train_losses, val_losses)
 
-    # ======== RESIDUALS – TRAINING ======
-    plot_residuals(train_y_true, train_y_pred,
-                   title="Training set",
-                   filename="residuals_train.png")
+    # === RESIDUALS ===
+    plot_residuals(train_true, train_pred, "Training – MLP", "mlp_residuals_train.png")
+    plot_residuals(test_true, test_pred, "Test – MLP", "mlp_residuals_test.png")
 
-    # ======== RESIDUALS – TESTING =======
-    plot_residuals(test_y_true, test_y_pred,
-                   title="Test set",
-                   filename="residuals_test.png")
+    # === PRED VS TRUE ===
+    plot_pred_vs_true(train_true, train_pred, "Training – MLP", "mlp_pred_vs_true_train.png")
+    plot_pred_vs_true(test_true, test_pred, "Test – MLP", "mlp_pred_vs_true_test.png")
 
-    # ======== PRED VS TRUE ===============
-    plot_pred_vs_true(train_y_true, train_y_pred,
-                      title="Training",
-                      filename="pred_vs_true_train.png")
+    print("\n======= FINAL RESULTS (MLP + MobileNet features) =======")
+    print("TRAIN:")
+    print(f"MSE: {train_mse:.4f}")
+    print(f"MAE: {train_mae:.4f}")
+    print(f"RMSE: {train_rmse:.4f}")
+    print(f"R²: {train_r2:.4f}")
 
-    plot_pred_vs_true(test_y_true, test_y_pred,
-                      title="Testing",
-                      filename="pred_vs_true_test.png")
+    print("\nTEST:")
+    print(f"MSE: {test_mse:.4f}")
+    print(f"MAE: {test_mae:.4f}")
+    print(f"RMSE: {test_rmse:.4f}")
+    print(f"R²: {test_r2:.4f}")
 
-    print("Start timestamp:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # ======== CURVES + PLOTS =========
+    plot_training_curves(train_losses, val_losses)
+    plot_residuals(train_true, train_pred, "Training", "residuals_train.png")
+    plot_residuals(test_true, test_pred, "Test", "residuals_test.png")
+    plot_pred_vs_true(train_true, train_pred, "Training", "pred_vs_true_train.png")
+    plot_pred_vs_true(test_true, test_pred, "Test", "pred_vs_true_test.png")
+
+
+    # # 4) TRANSFORMÁCIE + DATASETY + DATALOADER
+    # train_dataset = IrradianceDataset(train_df, transform=train_transform)
+    # val_dataset = IrradianceDataset(val_df, transform=val_test_transform)
+    # test_dataset = IrradianceDataset(test_df, transform=val_test_transform)
+    #
+    # train_loader = DataLoader(
+    #     train_dataset,
+    #     batch_size=BATCH_SIZE,
+    #     shuffle=True,
+    #     num_workers=4,
+    #     pin_memory=True
+    # )
+    # val_loader = DataLoader(
+    #     val_dataset,
+    #     batch_size=BATCH_SIZE,
+    #     shuffle=False,
+    #     num_workers=4,
+    #     pin_memory=True
+    # )
+    # test_loader = DataLoader(
+    #     test_dataset,
+    #     batch_size=BATCH_SIZE,
+    #     shuffle=False,
+    #     num_workers=4,
+    #     pin_memory=True
+    # )
+
+    # # 5) CNN MODEL
+    # model = CNNRegressor(dropout_rate=DROPOUT_RATE).to(device)
+    # criterion = nn.MSELoss()
+    # optimizer = torch.optim.Adam(
+    #     model.parameters(),
+    #     lr=LR,
+    #     weight_decay= 1e-4
+    #
+    # )
+    #
+    # # scheduler – znižuje LR, keď sa nezlepšuje validačný MSE
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer,
+    #     mode='min',
+    #     factor=0.5,
+    #     patience=5,
+    #     min_lr=1e-6,
+    #     verbose=True
+    # )
+    #
+    # best_val_loss = float("inf")
+    # best_state_dict = None
+    # train_losses = []
+    # val_losses = []
+    # best_val_loss = float("inf")
+    # epochs_no_improve = 0
+    #
+    # # 6) TRAIN LOOP + "checkpoint"
+    # for epoch in range(1, NUM_EPOCHS + 1):
+    #     model.train()
+    #     epoch_loss = 0.0
+    #
+    #     for X, y in train_loader:
+    #         X = X.to(device)
+    #         y = y.to(device).unsqueeze(1)
+    #
+    #         optimizer.zero_grad()
+    #         preds = model(X)
+    #         loss = criterion(preds, y)
+    #         loss.backward()
+    #         optimizer.step()
+    #
+    #         epoch_loss += loss.item() * X.size(0)
+    #
+    #     epoch_loss /= len(train_loader.dataset)
+    #
+    #     # VALIDÁCIA
+    #     val_mse, _, _, _, _, _ = evaluate_loader(model, val_loader, device)
+    #     scheduler.step(val_mse)
+    #
+    #
+    #     train_losses.append(epoch_loss)
+    #     val_losses.append(val_mse)
+    #
+    #
+    #     print(f"Epoch {epoch}/{NUM_EPOCHS} - "
+    #           f"train MSE: {epoch_loss:.4f} | val MSE: {val_mse:.4f}")
+    #
+    #     # uložíme najlepší model
+    #     if val_mse < best_val_loss:
+    #
+    #         best_val_loss = val_mse
+    #         best_state_dict = model.state_dict()
+    #         torch.save(best_state_dict, "best_model.pt")
+    #         epochs_no_improve = 0
+    #     else:
+    #         epochs_no_improve += 1
+    #         if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
+    #             print(f"\nEarly stopping triggered (no improvement for {EARLY_STOPPING_PATIENCE} epochs).")
+    #             break
+    #
+    # print("\nLoading BEST model from checkpoint...")
+    # if best_state_dict is None:
+    #     best_state_dict = torch.load("best_model.pt", map_location=device)
+    # model.load_state_dict(best_state_dict)
+    #
+    # # 7) EVALUÁCIA NA TRAIN + TEST
+    # print("\nEvaluating model on TRAINING SET...")
+    # train_mse, train_mae, train_rmse, train_r2, train_y_true, train_y_pred = \
+    #     evaluate_loader(model, train_loader, device)
+    #
+    # print("\nEvaluating model on TEST SET...")
+    # test_mse, test_mae, test_rmse, test_r2, test_y_true, test_y_pred = \
+    #     evaluate_loader(model, test_loader, device)
+    #
+    # print("\n================ MODEL METRICS ================")
+    # print("TRAINING:")
+    # print(f"MSE:  {train_mse:.4f}")
+    # print(f"MAE:  {train_mae:.4f}")
+    # print(f"RMSE: {train_rmse:.4f}")
+    # print(f"R2:   {train_r2:.4f}")
+    #
+    # print("\nTESTING:")
+    # print(f"MSE:  {test_mse:.4f}")
+    # print(f"MAE:  {test_mae:.4f}")
+    # print(f"RMSE: {test_rmse:.4f}")
+    # print(f"R2:   {test_r2:.4f}")
+    #
+    #
+    # # np.save("train_true.npy", train_y_true)
+    # # np.save("train_pred.npy", train_y_pred)
+    # # np.save("test_true.npy", test_y_true)
+    # # np.save("test_pred.npy", test_y_pred)
+    #
+    # print("\nReziduály uložené do .npy súborov.")
+    # print("================================================\n")
+    #
+    # # ========  TRAINING CURVES  =========
+    # plot_training_curves(train_losses, val_losses)
+    #
+    # # ======== RESIDUALS – TRAINING ======
+    # plot_residuals(train_y_true, train_y_pred,
+    #                title="Training set",
+    #                filename="residuals_train.png")
+    #
+    # # ======== RESIDUALS – TESTING =======
+    # plot_residuals(test_y_true, test_y_pred,
+    #                title="Test set",
+    #                filename="residuals_test.png")
+    #
+    # # ======== PRED VS TRUE ===============
+    # plot_pred_vs_true(train_y_true, train_y_pred,
+    #                   title="Training",
+    #                   filename="pred_vs_true_train.png")
+    #
+    # plot_pred_vs_true(test_y_true, test_y_pred,
+    #                   title="Testing",
+    #                   filename="pred_vs_true_test.png")
+
+    print("End timestamp:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 if __name__ == "__main__":
     main()
